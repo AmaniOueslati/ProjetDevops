@@ -1,0 +1,92 @@
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  name: 'Default'
+
+  workspace:
+      clean: all
+
+stages:
+  - stage: BuildAndDeploy
+    displayName: 'Build and Deploy Application'
+    jobs:
+      - job: BuildAndDeployJob
+        displayName: 'Build and Deploy'
+        steps:
+          # Checkout code
+          - checkout: self
+            clean: true
+
+          # Maven task to package the application
+          - task: Maven@3
+            inputs:
+              mavenPomFile: 'pom.xml'
+              goals: 'package'
+              options: '-DskipTests'
+
+          # Copy the built artifact to the staging directory
+          - task: CopyFiles@2
+            displayName: 'Copy Files to: $(Build.ArtifactStagingDirectory)'
+            inputs:
+              SourceFolder: '$(System.DefaultWorkingDirectory)'
+              Contents: '**/*.jar'
+              TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+          # Publish the artifact
+          - publish: $(Build.ArtifactStagingDirectory)
+            artifact: drop
+            condition: succeededOrFailed()
+
+          # Log in to Docker Hub using the service connection
+          - task: Docker@2
+            displayName: 'Login to Docker Hub'
+            inputs:
+              command: 'login'
+              containerRegistry: 'DockerHubConnection'  # The name of your Docker Hub service connection
+
+          # Ensure Docker Compose is installed and build Docker images
+          - task: Bash@3
+            displayName: 'Build Docker Images'
+            inputs:
+              targetType: 'inline'
+              script: |
+                docker-compose --version  # Ensure Docker Compose is installed
+
+                # Build the Docker images using Docker Compose
+                docker-compose -f docker-compose.yml build
+
+          # Tag and push the images to Docker Hub
+          - task: Bash@3
+            displayName: 'Tag and Push Docker Images'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "Tagging and pushing Docker images..."
+
+                # Define services to push
+                services=( discovery-server api-gateway product-service order-service inventory-service notification-service )
+
+                # Tag and push each image
+                for service in "${services[@]}"; do
+                  IMAGE="amani/$service:latest"
+                  docker tag $service $IMAGE
+                  docker push $IMAGE
+                done
+
+                # Optionally run the services
+                docker-compose -f docker-compose.yml up -d
+
+                # List running containers (optional)
+                docker ps
+
+          # Cleanup Docker containers (optional)
+          - task: Bash@3
+            displayName: 'Cleanup Docker Containers'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "Cleaning up Docker containers..."
+                docker-compose -f docker-compose.yml down
